@@ -1,0 +1,8 @@
+streamlit>=1.36
+opencv-python-headless
+numpy
+pandas
+imageio-ffmpeg
+webvtt-py
+google-genai
+faster-whisper
