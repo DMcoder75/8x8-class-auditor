@@ -5,7 +5,7 @@ import json
 import pandas as pd
 import streamlit as st
 
-from assess import assess
+from assess import DEFAULT_BASE_URL, DEFAULT_MODEL, assess
 from signals import analyze
 
 st.set_page_config(page_title="8x8 Class Quality Auditor", layout="wide")
@@ -48,12 +48,14 @@ with st.sidebar:
              "Name-calling can still be counted.")
 
     st.header("LLM assessment")
-    api_key = secret("GEMINI_API_KEY") or st.text_input("Gemini API key", type="password")
-    model_name = st.text_input("Model", secret("GEMINI_MODEL", "gemini-3.8-flash"),
-                               help="Use any current Gemini text model your key can access.")
+    api_key = (secret("LLM_API_KEY") or secret("GROQ_API_KEY")
+               or st.text_input("LLM API key (Groq)", type="password"))
+    model_name = st.text_input("Model", secret("LLM_MODEL", DEFAULT_MODEL),
+                               help="Any model your provider offers. Default is a Groq model.")
+    base_url = secret("LLM_BASE_URL", DEFAULT_BASE_URL)
     consent = st.checkbox(
         "I confirm the organiser permits sending the name-redacted transcript and computed "
-        "metrics (never the video or audio) to the Gemini API.")
+        "metrics (never the video or audio) to the LLM provider (Groq by default).")
     run = st.button("Run audit", type="primary", use_container_width=True,
                     disabled=video_file is None)
 
@@ -87,14 +89,14 @@ if run and video_file is not None:
     if consent and api_key:
         bar.progress(0.95, text="Asking the LLM to assess the class...")
         try:
-            st.session_state["assessment"] = assess(result, api_key, model_name)
+            st.session_state["assessment"] = assess(result, api_key, model_name, base_url)
         except Exception as e:  # noqa: BLE001
             st.session_state["llm_error"] = str(e)
     elif not consent:
         st.session_state["llm_error"] = ("LLM step skipped: consent box not ticked. "
                                          "Showing local signals only.")
     else:
-        st.session_state["llm_error"] = "LLM step skipped: no Gemini API key provided."
+        st.session_state["llm_error"] = "LLM step skipped: no LLM API key provided."
     bar.empty()
 
 # ---- Results ----------------------------------------------------------------
