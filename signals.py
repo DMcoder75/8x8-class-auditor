@@ -253,18 +253,37 @@ def pseudonymize_speakers(cues: list[Cue]) -> list[Cue]:
     return out
 
 
-def transcribe_local(wav_path: str, model_size: str = "base", progress=None) -> list[Cue]:
-    """Transcribe on this machine (audio never leaves the server)."""
+def transcribe_local(wav_path: str, model_size: str = "base", progress=None,
+                     chunk_s: int = 600) -> list[Cue]:
+    """Transcribe on this machine (audio never leaves the server).
+
+    The WAV is read here and passed to Whisper as an array in 10-minute chunks, which
+    avoids Whisper's own PyAV decoder (a version mismatch there caused errors) and keeps
+    memory low for long classes.
+    """
     from faster_whisper import WhisperModel
     model = WhisperModel(model_size, device="cpu", compute_type="int8")
-    segments, info = model.transcribe(wav_path, vad_filter=True, beam_size=1)
-    cues = []
-    for s in segments:
-        text = s.text.strip()
-        if text:
-            cues.append(Cue(float(s.start), float(s.end), text))
-        if progress and info.duration:
-            progress(min(s.end / info.duration, 1.0))
+    cues, language, done = [], None, 0
+    with wave.open(wav_path, "rb") as w:
+        sr, total = w.getframerate(), w.getnframes()
+        while done < total:
+            raw = w.readframes(sr * chunk_s)
+            if not raw:
+                break
+            audio = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+            if len(audio) < sr:  # ignore a sub-second trailing fragment
+                break
+            offset = done / sr
+            segments, info = model.transcribe(audio, language=language,
+                                              vad_filter=True, beam_size=1)
+            language = language or info.language  # detect once, reuse for later chunks
+            for seg in segments:
+                text = seg.text.strip()
+                if text:
+                    cues.append(Cue(offset + float(seg.start), offset + float(seg.end), text))
+            done += len(audio)
+            if progress:
+                progress(min(done / total, 1.0))
     return cues
 
 
