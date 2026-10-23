@@ -129,8 +129,15 @@ def video_metrics(video_path: str, every_s: float = 5.0, max_samples: int = 240)
     if len(times) > max_samples:
         times = np.linspace(0, max(duration - 1, 0), max_samples)
 
-    cascade = cv2.CascadeClassifier(
-        os.path.join(cv2.data.haarcascades, "haarcascade_frontalface_default.xml"))
+    # Face detection is optional: if this OpenCV build lacks it (e.g. two OpenCV
+    # packages installed side by side), skip it rather than failing the whole run.
+    try:
+        cascade = cv2.CascadeClassifier(
+            os.path.join(cv2.data.haarcascades, "haarcascade_frontalface_default.xml"))
+        if cascade.empty():
+            cascade = None
+    except Exception:  # noqa: BLE001
+        cascade = None
 
     brightness, contrast, sharpness, dark, faces_seen, small = [], [], [], [], [], []
     width = height = 0
@@ -148,8 +155,9 @@ def video_metrics(video_path: str, every_s: float = 5.0, max_samples: int = 240)
         contrast.append(c)
         sharpness.append(float(cv2.Laplacian(gray, cv2.CV_64F).var()))
         dark.append(b < 25 or c < 10)          # black / flat frame => camera off
-        found = cascade.detectMultiScale(gray, 1.1, 5, minSize=(20, 20))
-        faces_seen.append(len(found) > 0)
+        if cascade is not None:
+            found = cascade.detectMultiScale(gray, 1.1, 5, minSize=(20, 20))
+            faces_seen.append(len(found) > 0)
         small.append(cv2.GaussianBlur(cv2.resize(gray, (160, 90)), (5, 5), 0).astype(np.float32))
     cap.release()
 
@@ -166,7 +174,7 @@ def video_metrics(video_path: str, every_s: float = 5.0, max_samples: int = 240)
         "mean_contrast": round(float(np.mean(contrast)), 1),
         "mean_sharpness": round(float(np.mean(sharpness)), 1),
         "dark_ratio": round(float(np.mean(dark)), 3),
-        "face_ratio": round(float(np.mean(faces_seen)), 3),
+        "face_ratio": round(float(np.mean(faces_seen)), 3) if faces_seen else None,
         # how often the picture changes between samples (slides, board, movement)
         "change_ratio": round(float(np.mean([d > 4 for d in diffs])), 3) if diffs else 0.0,
         # near-identical consecutive samples (frozen video / camera off / static slide)
@@ -297,7 +305,7 @@ def heuristic_flags(audio: dict, video: dict, text: dict) -> list[dict]:
     if video.get("readable"):
         if video["dark_ratio"] > T["dark_ratio_camera_off"]:
             add("risk", f"Camera looks off or black in {video['dark_ratio']:.0%} of sampled frames.")
-        elif video["face_ratio"] < T["face_ratio_low"]:
+        elif video["face_ratio"] is not None and video["face_ratio"] < T["face_ratio_low"]:
             add("info", f"A face was detected in only {video['face_ratio']:.0%} of frames "
                         "(could be camera angle, screen-share only, or a tiny video tile). Verify.")
         if video["dark_ratio"] <= T["dark_ratio_camera_off"]:  # skip if camera is simply off

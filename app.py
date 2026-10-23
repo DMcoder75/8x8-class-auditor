@@ -49,7 +49,7 @@ with st.sidebar:
 
     st.header("LLM assessment")
     api_key = secret("GEMINI_API_KEY") or st.text_input("Gemini API key", type="password")
-    model_name = st.text_input("Model", secret("GEMINI_MODEL", "gemini-1.5-flash"),
+    model_name = st.text_input("Model", secret("GEMINI_MODEL", "gemini-2.5-flash"),
                                help="Use any current Gemini text model your key can access.")
     consent = st.checkbox(
         "I confirm the organiser permits sending the name-redacted transcript and computed "
@@ -63,7 +63,6 @@ if run and video_file is not None:
     st.session_state.pop("llm_error", None)
     bar = st.progress(0.0, text="Starting...")
     with tempfile.TemporaryDirectory() as tmp:
-        # BUG FIXED: Added back the explicit element tuple slice [1] to avoid script crashes
         suffix = os.path.splitext(video_file.name)[1] or ".mp4"
         video_path = os.path.join(tmp, "class" + suffix)
         with open(video_path, "wb") as f:
@@ -118,7 +117,8 @@ with left:
         c2.metric("Longest silence", f"{a['longest_silence_s']} s")
     if v.get("readable"):
         c1.metric("Camera off/black", f"{v['dark_ratio']:.0%}")
-        c2.metric("Face detected", f"{v['face_ratio']:.0%}")
+        if v.get("face_ratio") is not None:
+            c2.metric("Face detected", f"{v['face_ratio']:.0%}")
         c1.metric("Brightness", f"{v['mean_brightness']:.1f}")
         c2.metric("Sharpness", f"{v['mean_sharpness']:.1f}")
     if t.get("available"):
@@ -141,16 +141,16 @@ with right:
     assessment = st.session_state.get("assessment")
     if st.session_state.get("llm_error"):
         st.warning(st.session_state["llm_error"])
-        
+
     if assessment:
         if isinstance(assessment, str):
             try:
                 assessment = json.loads(assessment)
             except Exception:
                 pass
-                
+
         if isinstance(assessment, dict):
-            rating = assessment.get("rating", "Average")
+            rating = assessment.get("rating", "Unrated")
             confidence = assessment.get("confidence", "n/a")
             summary_text = assessment.get("summary", "")
             evidence_list = assessment.get("evidence", [])
@@ -158,7 +158,7 @@ with right:
             improvements_list = assessment.get("improvements", assessment.get("recommendations", []))
             caveats_text = assessment.get("signal_caveats", "")
         else:
-            rating = "Average"
+            rating = "Unrated"
             confidence = "n/a"
             summary_text = str(assessment)
             evidence_list = []
