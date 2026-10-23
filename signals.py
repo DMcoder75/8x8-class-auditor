@@ -190,16 +190,67 @@ class Cue:
     start: float
     end: float
     text: str
+    speaker: str = ""
+
+
+SPEAKER_RE = re.compile(r"^([^:]{1,40}):\s+(.*)$")
 
 
 def parse_vtt(path: str) -> list[Cue]:
     import webvtt
-    cues = []
+    raw = []
     for c in webvtt.read(path):
         text = re.sub(r"\s+", " ", c.text).strip()
         if text:
-            cues.append(Cue(c.start_in_seconds, c.end_in_seconds, text))
+            raw.append((c.start_in_seconds, c.end_in_seconds, text))
+    matches = [SPEAKER_RE.match(t) for _, _, t in raw]
+    has_speakers = bool(raw) and sum(m is not None for m in matches) / len(raw) >= 0.5
+    cues, last = [], ""
+    for (start, end, text), m in zip(raw, matches):
+        speaker = ""
+        if has_speakers:
+            if m:
+                last, text = m.group(1).strip(), m.group(2).strip()
+            speaker = last
+        if text:
+            cues.append(Cue(start, end, text, speaker))
     return cues
+
+
+_NAME_STOP = {"user", "iphone", "ipad", "phone", "admin", "guest", "host", "zoom"}
+
+
+def pseudonymize_speakers(cues: list[Cue]) -> list[Cue]:
+    """Replace speaker labels with TEACHER / STUDENT_n (teacher = most words) and
+    scrub the speakers' own names from the text, so no real names leave the server."""
+    if not any(c.speaker for c in cues):
+        return cues
+    words = {}
+    for c in cues:
+        words[c.speaker] = words.get(c.speaker, 0) + len(c.text.split())
+    teacher = max(words, key=words.get)
+    labels, n = {}, 0
+    for c in cues:
+        if c.speaker not in labels:
+            if c.speaker == teacher:
+                labels[c.speaker] = "TEACHER"
+            else:
+                n += 1
+                labels[c.speaker] = f"STUDENT_{n}"
+    pats, seen = [], set()
+    for name, label in labels.items():
+        for tok in re.findall(r"[A-Za-z]{3,}", name):
+            if tok.lower() in _NAME_STOP or tok.lower() in seen:
+                continue
+            seen.add(tok.lower())
+            pats.append((re.compile(r"\b%s\b" % re.escape(tok), re.I), f"[{label}]"))
+    out = []
+    for c in cues:
+        text = c.text
+        for pat, rep in pats:
+            text = pat.sub(rep, text)
+        out.append(Cue(c.start, c.end, text, labels[c.speaker]))
+    return out
 
 
 def transcribe_local(wav_path: str, model_size: str = "base", progress=None) -> list[Cue]:
@@ -229,7 +280,7 @@ def redact(cues: list[Cue], names: list[str]) -> list[Cue]:
         text = c.text
         for pat, rep in pats:
             text = pat.sub(rep, text)
-        out.append(Cue(c.start, c.end, text))
+        out.append(Cue(c.start, c.end, text, c.speaker))
     return out
 
 
@@ -246,6 +297,8 @@ HOMEWORK_RE = re.compile(
 QUESTION_START_RE = re.compile(
     r"^(what|why|how|who|where|when|which|can you|could you|do you|did you|are you|"
     r"is it|have you|will you|would you)\b", re.I)
+PRAISE_RE = re.compile(
+    r"\b(very good|good job|well done|perfect|excellent|great|nice|awesome|wonderful)\b", re.I)
 PRIVACY_RE = re.compile(
     r"\b(phone number|mobile number|your number|home address|your address|where do you live|"
     r"e-?mail|whatsapp|password|last name|which school)\b", re.I)
@@ -271,7 +324,25 @@ def transcript_signals(cues: list[Cue], duration_s: float) -> dict:
             privacy_mentions.append({"time": fmt_time(c.start), "context": ctx})
 
     minutes = max(duration_s / 60.0, 1e-9)
+    speaker_stats = {}
+    if any(c.speaker for c in cues):
+        t_cues = [c for c in cues if c.speaker == "TEACHER"]
+        s_cues = [c for c in cues if c.speaker and c.speaker != "TEACHER"]
+        tw = sum(len(c.text.split()) for c in t_cues)
+        sw = sum(len(c.text.split()) for c in s_cues)
+        t_text = " ".join(c.text for c in t_cues)
+        called = re.findall(r"\[STUDENT_\d+\]", t_text)
+        speaker_stats = {
+            "teacher_word_share": round(tw / max(tw + sw, 1), 3),
+            "students_who_spoke": len({c.speaker for c in s_cues}),
+            "teacher_questions_per_10min": round(t_text.count("?") / minutes * 10, 1),
+            # undercount likely: speech-to-text mangles names
+            "teacher_name_calls": len(called),
+            "distinct_students_called_by_name": len(set(called)),
+            "teacher_praise_per_10min": round(len(PRAISE_RE.findall(t_text)) / minutes * 10, 1),
+        }
     return {
+        **speaker_stats,
         "available": True,
         "words": words,
         "words_per_min": round(words / minutes, 1),
@@ -321,11 +392,15 @@ def heuristic_flags(audio: dict, video: dict, text: dict) -> list[dict]:
         if not text["greeting_in_first_2min"]:
             add("risk", "No greeting or rapport-building detected in the first 2 minutes.")
         if not text["homework_mentioned_anywhere"]:
-            add("risk", "Homework or follow-up work is never mentioned.")
+            add("info", "Homework or follow-up work is never mentioned (weak signal: not every strong class sets it).")
         elif not text["homework_mentioned_in_last_20pct"]:
             add("info", "Homework is mentioned, but not near the end of the class.")
-        if text["questions_per_10min"] < T["min_questions_per_10min"]:
-            add("risk", f"Few questions to students ({text['questions_per_10min']} per 10 min).")
+        qpm = text.get("teacher_questions_per_10min", text["questions_per_10min"])
+        if qpm < T["min_questions_per_10min"]:
+            add("risk", f"Few questions to students ({qpm} per 10 min).")
+        if text.get("teacher_word_share", 0) > 0.8:
+            add("info", f"Teacher speaks {text['teacher_word_share']:.0%} of all words; "
+                        "students get little airtime.")
         if text["privacy_mentions"]:
             add("info", f"{len(text['privacy_mentions'])} mention(s) of personal information. "
                         "Needs context to judge whether the teacher enforced or broke the rule.")
@@ -363,7 +438,7 @@ def analyze(video_path: str, vtt_path: str | None = None, whisper_model: str | N
 
     duration = (audio.get("duration_s") or video.get("duration_s")
                 or (cues[-1].end if cues else 0))
-    cues = redact(cues, names or [])
+    cues = redact(pseudonymize_speakers(cues), names or [])
     text = transcript_signals(cues, duration)
     return {
         "duration_s": duration,
