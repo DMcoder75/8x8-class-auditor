@@ -49,7 +49,7 @@ with st.sidebar:
 
     st.header("LLM assessment")
     api_key = secret("GEMINI_API_KEY") or st.text_input("Gemini API key", type="password")
-    model_name = st.text_input("Model", secret("GEMINI_MODEL", "gemini-2.5-flash"),
+    model_name = st.text_input("Model", secret("GEMINI_MODEL", "gemini-3.8-flash"),
                                help="Use any current Gemini text model your key can access.")
     consent = st.checkbox(
         "I confirm the organiser permits sending the name-redacted transcript and computed "
