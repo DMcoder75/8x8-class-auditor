@@ -47,12 +47,12 @@ def format_transcript(cues, max_chars: int = 150_000) -> str:
     return text[:half] + "\n[... middle of transcript omitted for length ...]\n" + text[-half:]
 
 
-def build_prompt(result: dict) -> str:
+def build_prompt(result: dict, max_chars: int = 150_000) -> str:
     audio = {k: v for k, v in result["audio"].items() if k != "speech_per_min"}
     signals = {"audio": audio, "video": result["video"],
                "transcript": {k: v for k, v in result["text"].items()}}
     flags = "\n".join(f"- ({f['kind']}) {f['msg']}" for f in result["flags"]) or "- none"
-    transcript = format_transcript(result["cues"]) or "(no transcript available)"
+    transcript = format_transcript(result["cues"], max_chars) or "(no transcript available)"
     return f"""You are a senior quality auditor for 8x8, an online education company that teaches children.
 Assess ONE recorded class and rate it Poor, Average, Good or Excellent.
 
@@ -87,19 +87,48 @@ def _parse_json(raw: str) -> dict:
     return json.loads(raw)
 
 
-def assess(result: dict, api_key: str, model: str) -> dict:
-    from google import genai
-    from google.genai import types
+DEFAULT_BASE_URL = "https://api.groq.com/openai/v1"   # the /openai/v1 part is required
+DEFAULT_MODEL = "llama-3.3-70b-versatile"
+# Free tiers cap tokens per minute, so retry with a shorter transcript if rejected.
+TRANSCRIPT_SIZES = [60_000, 30_000, 15_000]
 
-    client = genai.Client(api_key=api_key)
-    response = client.models.generate_content(
-        model=model,
-        contents=build_prompt(result),
-        config=types.GenerateContentConfig(
-            temperature=0, response_mime_type="application/json"),
-    )
-    data = _parse_json(response.text)
 
+def _is_size_or_rate_error(msg: str) -> bool:
+    msg = msg.lower()
+    return any(k in msg for k in ("413", "429", "too large", "rate_limit", "tokens per minute",
+                                  "request too", "context length", "reduce your"))
+
+
+def assess(result: dict, api_key: str, model: str = DEFAULT_MODEL,
+           base_url: str = DEFAULT_BASE_URL) -> dict:
+    from openai import OpenAI
+
+    client = OpenAI(base_url=base_url, api_key=api_key)
+    last_error = None
+    for max_chars in TRANSCRIPT_SIZES:
+        prompt = build_prompt(result, max_chars)
+        try:
+            try:
+                response = client.chat.completions.create(
+                    model=model, temperature=0,
+                    messages=[{"role": "user", "content": prompt}],
+                    response_format={"type": "json_object"})
+            except Exception as e:  # provider without JSON mode: retry plain
+                if "response_format" in str(e).lower() or "json" in str(e).lower():
+                    response = client.chat.completions.create(
+                        model=model, temperature=0,
+                        messages=[{"role": "user", "content": prompt}])
+                else:
+                    raise
+            break
+        except Exception as e:  # noqa: BLE001
+            last_error = e
+            if not _is_size_or_rate_error(str(e)):
+                raise
+    else:
+        raise RuntimeError(f"Transcript still too large for this model's limits: {last_error}")
+
+    data = _parse_json(response.choices[0].message.content)
     rating = str(data.get("rating", "")).strip().title()
     data["rating"] = rating if rating in RATINGS else "Unrated"
     data.setdefault("confidence", "low")
