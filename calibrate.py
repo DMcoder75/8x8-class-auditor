@@ -65,6 +65,23 @@ def main():
     print(summary.round(3).to_string())
     print("\nPer-file values saved to signals.csv")
 
+    # Aggregates only (no recordings or transcripts), safe to commit. assess.py shows
+    # them to the LLM so its rating is anchored to your labelled samples.
+    keep = ["text.teacher_word_share", "text.students_who_spoke", "text.teacher_questions_per_10min",
+            "text.questions_per_10min", "text.teacher_praise_per_10min", "text.words_per_min",
+            "text.distinct_students_called_by_name", "text.homework_mentioned_anywhere",
+            "audio.speech_ratio", "audio.long_silence_ratio", "audio.longest_silence_s",
+            "video.dark_ratio", "video.mean_brightness", "video.frozen_ratio"]
+    keep = [k for k in keep if k in df.columns]
+    ref = {}
+    for label, grp in df.groupby("label"):
+        ref[label] = {"n": int(len(grp)),
+                      "means": {k.split(".")[1]: round(float(grp[k].mean()), 2) for k in keep}}
+    import json
+    with open("reference_profiles.json", "w") as f:
+        json.dump(ref, f, indent=2)
+    print("Wrote reference_profiles.json (commit this file)")
+
 
 if __name__ == "__main__":
     main()
