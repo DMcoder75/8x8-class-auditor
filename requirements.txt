@@ -6,3 +6,4 @@ imageio-ffmpeg
 webvtt-py
 google-genai
 faster-whisper
+openai
